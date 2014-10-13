@@ -12,6 +12,14 @@ import java.security.MessageDigest
 
 class MD5Checker(val root: Path, val s3SiteClient: S3SiteClient) extends StrictLogging {
 
+  abstract class FileStatus 
+
+  case class New(val path:Path) extends FileStatus
+  case class Update(val path:Path) extends FileStatus
+  case class Same() extends FileStatus
+  case class Ignore() extends FileStatus
+
+
   lazy val md5 = MessageDigest.getInstance("MD5")
 
   lazy val s3Files = s3SiteClient.filesWithMd5.map(t => (Paths.get(t._1), t._2)).toMap
@@ -19,10 +27,19 @@ class MD5Checker(val root: Path, val s3SiteClient: S3SiteClient) extends StrictL
   def check():List[(Path, Boolean)] = check(Paths.get(""))
 
   def check(keyPath: Path): List[(Path, Boolean)] = {
-    val localFiles = filesWithMd5(keyPath).filter(t => !Files.isHidden(t._1) && !t._1.toString.endsWith(".less"))
-    val newFiles = localFiles filter(f => !s3Files.contains(f._1)) map(t => (t._1,  true))
-    val updateFiles = localFiles filter(f => s3Files.get(f._1).filter(md5 => f._2 != md5).isDefined) map (t=>(t._1, false))
-    newFiles ::: listFiles(keyPath, true).flatMap(check(_)) ::: updateFiles
+    val files = filesWithMd5(keyPath).map(_ match{
+      case (path, md5) if Files.isHidden(path) || path.toString.endsWith(".less") => Ignore()
+      case (path, md5) => s3Files.get(path) match {
+        case None => New(path)
+        case Some(oldMd5) if oldMd5 == md5  => Same()
+        case _ => Update(path)
+      }
+    }).flatMap(_ match {
+      case New(path) => List((path, true))  
+      case Update(path) => List((path, false))  
+      case _ => Nil
+    })
+    files ::: listFiles(keyPath, true).flatMap(check(_))
   }
 
   def filesWithMd5(folder: Path): List[(Path, String)] = {
